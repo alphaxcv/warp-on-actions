@@ -33,6 +33,9 @@ runs:
             sudo warp-cli --accept-tos tunnel ip add-range 0.0.0.0/0
           fi
           sudo warp-cli --accept-tos connect
+          echo "Waiting for WARP client to connect..."
+          timeout 30 bash -c 'until sudo warp-cli status 2>/dev/null | grep -q "Connected"; do sleep 1; done' \
+            || { echo "WARP client failed to connect within 30s"; exit 1; }
 
         elif [ "${{ inputs.mode }}" == 'wireguard' ]; then
           echo "WARP mode: wireguard."
@@ -70,22 +73,42 @@ runs:
           CONFIG+="Endpoint = engage.cloudflareclient.com:2408"
           echo "$CONFIG" | sed "s/^[ ]\+//g" | sudo tee /etc/wireguard/warp.conf
           sudo wg-quick up warp
-          
+          echo "Waiting for warp interface..."
+          timeout 10 bash -c 'until ip link show warp &>/dev/null; do sleep 1; done' \
+            || { echo "warp interface did not come up"; exit 1; }
+
         else
           echo -e "WARP mode: ${{ inputs.mode }}.\nYou can choose client or wireguard."
           exit 1
-        fi          
+        fi
 
-        sleep 2
+        echo "Waiting for network connectivity..."
+        wait_for_warp() {
+          local max=30
+          local i=0
+          while [ $i -lt $max ]; do
+            if timeout 4 curl -s --connect-timeout 2 -4 https://api-ipv4.ip.sb/ip 2>/dev/null | grep -qE '^[0-9]+\.[0-9]+'; then
+              return 0
+            fi
+            sleep 1
+            i=$((i+1))
+          done
+          return 1
+        }
+        if ! wait_for_warp; then
+          echo "WARP failed to pass traffic within 30s"
+          exit 1
+        fi
+
         echo -e "===============================\nIP:"
-        
+
         get_ip() {
             local url_primary=$1
             local url_backup=$2
             local flag=$3
-            result=$(timeout 5 curl -s $flag --connect-timeout 2 --max-time 4 --retry 1 -A Mozilla https://$url_primary 2>/dev/null)
+            result=$(timeout 10 curl -s $flag --connect-timeout 3 --max-time 8 --retry 3 --retry-delay 1 -A Mozilla https://$url_primary 2>/dev/null)
             if [ -z "$result" ]; then
-                result=$(timeout 5 curl -s $flag --connect-timeout 2 --max-time 4 --retry 1 https://$url_backup 2>/dev/null)
+                result=$(timeout 10 curl -s $flag --connect-timeout 3 --max-time 8 --retry 3 --retry-delay 1 https://$url_backup 2>/dev/null)
             fi
             if [ -z "$result" ]; then echo "N/A"; else echo "$result"; fi
         }
