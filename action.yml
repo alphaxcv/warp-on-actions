@@ -54,7 +54,7 @@ runs:
           PostDown = ip -4 rule delete from $LAN lookup main
           DNS = 1.1.1.1,8.8.8.8,8.8.4.4,2606:4700:4700::1111,2001:4860:4860::8888,2001:4860:4860::8844
           MTU = 1280
-          
+
           [Peer]
           PublicKey = bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=
           "
@@ -72,31 +72,36 @@ runs:
           fi
           CONFIG+="Endpoint = engage.cloudflareclient.com:2408"
           echo "$CONFIG" | sed "s/^[ ]\+//g" | sudo tee /etc/wireguard/warp.conf
-          sudo wg-quick up warp
-          echo "Waiting for warp interface..."
-          timeout 10 bash -c 'until ip link show warp &>/dev/null; do sleep 1; done' \
-            || { echo "warp interface did not come up"; exit 1; }
+
+          MAX_RETRIES=3
+          for attempt in $(seq 1 $MAX_RETRIES); do
+            echo "WARP connect attempt $attempt/$MAX_RETRIES..."
+            sudo wg-quick down warp 2>/dev/null || true
+            sudo wg-quick up warp
+
+            connected=0
+            for i in $(seq 1 15); do
+              if sudo wg show warp latest-handshakes 2>/dev/null | grep -qE '[1-9][0-9]*'; then
+                connected=1
+                break
+              fi
+              sleep 2
+            done
+
+            if [ $connected -eq 1 ]; then
+              echo "WARP connected on attempt $attempt"
+              break
+            fi
+
+            echo "Attempt $attempt failed, retrying..."
+            if [ $attempt -eq $MAX_RETRIES ]; then
+              echo "WARP failed after $MAX_RETRIES attempts"
+              exit 1
+            fi
+          done
 
         else
           echo -e "WARP mode: ${{ inputs.mode }}.\nYou can choose client or wireguard."
-          exit 1
-        fi
-
-        echo "Waiting for network connectivity..."
-        wait_for_warp() {
-          local max=30
-          local i=0
-          while [ $i -lt $max ]; do
-            if timeout 4 curl -s --connect-timeout 2 -4 https://api-ipv4.ip.sb/ip 2>/dev/null | grep -qE '^[0-9]+\.[0-9]+'; then
-              return 0
-            fi
-            sleep 1
-            i=$((i+1))
-          done
-          return 1
-        }
-        if ! wait_for_warp; then
-          echo "WARP failed to pass traffic within 30s"
           exit 1
         fi
 
