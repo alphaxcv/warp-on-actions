@@ -32,10 +32,24 @@ runs:
           elif [ "${{ inputs.stack }}" == 'ipv6' ]; then
             sudo warp-cli --accept-tos tunnel ip add-range 0.0.0.0/0
           fi
-          sudo warp-cli --accept-tos connect
-          echo "Waiting for WARP client to connect..."
-          timeout 30 bash -c 'until sudo warp-cli status 2>/dev/null | grep -q "Connected"; do sleep 1; done' \
-            || { echo "WARP client failed to connect within 30s"; exit 1; }
+          echo "Connecting WARP client..."
+          client_connected=0
+          for attempt in $(seq 1 8); do
+            echo "WARP client connect attempt $attempt/8..."
+            sudo warp-cli --accept-tos disconnect 2>/dev/null || true
+            sudo warp-cli --accept-tos connect
+            if timeout 30 bash -c 'until sudo warp-cli status 2>/dev/null | grep -q "Connected"; do sleep 1; done'; then
+              client_connected=1
+              echo "WARP client connected on attempt $attempt"
+              break
+            fi
+            echo "Attempt $attempt failed, retrying..."
+            sleep $((attempt * 3))
+          done
+          if [ $client_connected -ne 1 ]; then
+            echo "WARP client failed to connect after 8 attempts"
+            exit 1
+          fi
 
         elif [ "${{ inputs.mode }}" == 'wireguard' ]; then
           echo "WARP mode: wireguard."
@@ -73,14 +87,14 @@ runs:
           CONFIG+="Endpoint = engage.cloudflareclient.com:2408"
           echo "$CONFIG" | sed "s/^[ ]\+//g" | sudo tee /etc/wireguard/warp.conf
 
-          MAX_RETRIES=3
+          MAX_RETRIES=8
           for attempt in $(seq 1 $MAX_RETRIES); do
             echo "WARP connect attempt $attempt/$MAX_RETRIES..."
             sudo wg-quick down warp 2>/dev/null || true
             sudo wg-quick up warp
 
             connected=0
-            for i in $(seq 1 15); do
+            for i in $(seq 1 30); do
               if sudo wg show warp latest-handshakes 2>/dev/null | grep -qE '[1-9][0-9]*'; then
                 connected=1
                 break
@@ -94,6 +108,8 @@ runs:
             fi
 
             echo "Attempt $attempt failed, retrying..."
+            # 失败后逐步增加等待时间，避免端点临时限流导致连续失败
+            sleep $((attempt * 3))
             if [ $attempt -eq $MAX_RETRIES ]; then
               echo "WARP failed after $MAX_RETRIES attempts"
               exit 1
