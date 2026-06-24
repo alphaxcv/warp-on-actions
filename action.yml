@@ -1,5 +1,5 @@
 name: 'Install WARP'
-author: 'just for test'
+author: 'jfu'
 description: 'Install Cloudflare Warp on Github actions'
 
 inputs:
@@ -108,7 +108,6 @@ runs:
             fi
 
             echo "Attempt $attempt failed, retrying..."
-            # 失败后逐步增加等待时间，避免端点临时限流导致连续失败
             sleep $((attempt * 3))
             if [ $attempt -eq $MAX_RETRIES ]; then
               echo "WARP failed after $MAX_RETRIES attempts"
@@ -122,19 +121,30 @@ runs:
         fi
 
         echo -e "===============================\nIP:"
+        
+        # 核心修复 1：等待路由和 DNS 彻底生效（极大地减少超时和获取失败）
+        echo "Waiting 5 seconds for network routes to stabilize..."
+        sleep 5
 
+        # 核心修复 2：极简、高效的 Cloudflare 原生 Trace 接口提取
         get_ip() {
-            local url_primary=$1
-            local url_backup=$2
-            local flag=$3
-            result=$(timeout 10 curl -s $flag --connect-timeout 3 --max-time 8 --retry 3 --retry-delay 1 -A Mozilla https://$url_primary 2>/dev/null)
-            if [ -z "$result" ]; then
-                result=$(timeout 10 curl -s $flag --connect-timeout 3 --max-time 8 --retry 3 --retry-delay 1 https://$url_backup 2>/dev/null)
-            fi
-            if [ -z "$result" ]; then echo "N/A"; else echo "$result"; fi
+            local flag=$1
+            local result
+            
+            for attempt in {1..3}; do
+                result=$(curl -s $flag --connect-timeout 3 --max-time 5 "https://cloudflare.com/cdn-cgi/trace" 2>/dev/null)
+                
+                # 校验返回值是否包含 ip= 字段，防止获取到空值或错误页面
+                if [[ -n "$result" && "$result" == *"ip="* ]]; then
+                    echo "$result" | grep -E "^ip=" | cut -d= -f2
+                    return
+                fi
+                sleep 2
+            done
+            echo "N/A"
         }
 
-        echo "IPv4: $(get_ip "api-ipv4.ip.sb/geoip" "speed.cloudflare.com/meta" "-4")"
-        echo "IPv6: $(get_ip "api-ipv6.ip.sb/geoip" "speed.cloudflare.com/meta" "-6")"
+        echo "IPv4: $(get_ip "-4")"
+        echo "IPv6: $(get_ip "-6")"
 
       shell: bash
